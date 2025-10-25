@@ -51,21 +51,38 @@ NORMALIZE_JOIN_LINEBREAKED_WORDS = True
 
 
 def normalize_extracted_text(s: str) -> str:
+    """
+    Pipeline de limpeza de texto robusto e unificado.
+    Converte texto bruto de qualquer fonte para uma forma canónica limpa.
+    """
     if not s:
         return s
-    # ligaduras e unicodes invisíveis
-    s = (s.replace("ﬁ", "fi").replace("ﬂ", "fl")
-           .replace("ﬀ","ff").replace("ﬃ","ffi").replace("ﬄ","ffl").replace("ﬆ","st"))
-    s = s.replace("\u00ad", "").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
-    # juntar palavras partidas COM hífen:  tex- \n ture  -> texture
+
+    # 1. Consistência Unicode: 'NFKC' é a melhor forma para normalização de compatibilidade.
+    #    Trata de ligaduras (ﬁ -> fi), larguras de caracteres, etc.
+    s = unicodedata.normalize('NFKC', s)
+
+    # 2. Remoção Agressiva de "Lixo":
+    #    - Soft-hyphen (\u00ad)
+    #    - Zero-width spaces (\u200b, \u200c, \u200d)
+    s = s.replace("\u00ad", "")
+    s = re.sub(r'[\u200b-\u200d]', '', s)
+
+    # 3. De-hifenização Robusta (palavras quebradas COM hífen):
+    #    Ex: "tex- \n ture" -> "texture"
     s = re.sub(r"([0-9A-Za-zÀ-ÖØ-öø-ÿ])-\s*\n\s*([0-9A-Za-zÀ-ÖØ-öø-ÿ])", r"\1\2", s, flags=re.UNICODE)
+
+    # 4. De-hifenização de palavras quebradas SEM hífen (opcional):
+    #    Ex: "tex \n ture" -> "texture"
+    #    Tornado mais robusto para aceitar que a segunda parte comece com maiúscula.
     if NORMALIZE_JOIN_LINEBREAKED_WORDS:
-        # juntar palavras partidas SEM hífen:  tex \n ture -> texture
-        s = re.sub(r"([A-Za-zÀ-ÖØ-öø-ÿ])\s*\n\s*([a-zà-öø-ÿ])", r"\1\2", s, flags=re.UNICODE)
-    # restantes quebras → espaço
-    s = re.sub(r"\s*\n\s*", " ", s)
-    # colapsar espaços
-    s = re.sub(r"[ \t]{2,}", " ", s)
+        s = re.sub(r"([A-Za-zÀ-ÖØ-öø-ÿ])\s*\n\s*([A-Za-zÀ-ÖØ-öø-ÿ])", r"\1\2", s, flags=re.UNICODE)
+
+    # 5. Unificação de Espaços:
+    #    - Substitui todas as formas de quebra de linha e espaçamento por um único espaço.
+    #    - Colapsa múltiplos espaços num só.
+    s = re.sub(r'\s+', ' ', s)
+
     return s.strip()
 
 
@@ -1695,20 +1712,21 @@ def pdf_has_text(filepath):
 def search_in_text_file(filepath, boolean_parser, context_size):
     """Refactored search for text files."""
     results = []
-    raw = None
+    raw_text = None
     for enc in ("utf-8-sig", "utf-8", "utf-16", "latin-1"):
         try:
             with open(filepath, "r", encoding=enc, errors="ignore") as fh:
-                raw = fh.read()
-            if raw:
+                raw_text = fh.read()
+            if raw_text is not None:
                 break
         except Exception:
             continue
-    if not raw:
+    if not raw_text:
         print(f"Error reading text file {filepath}: empty/decoding failed")
         return results
 
-    text = normalize_extracted_text(raw)
+    # UNIFIED NORMALIZATION APPLIED DIRECTLY
+    text = normalize_extracted_text(raw_text)
 
     if boolean_parser.is_simple_query():
         spans = boolean_parser.find_all_term_occurrences(text)
@@ -1755,119 +1773,102 @@ def search_in_text_file(filepath, boolean_parser, context_size):
 
 def search_in_pdf_file(filepath, boolean_parser, context_size, ocr_mode="auto"):
     """
-    Search in PDF files with OCR mode control
-
-    OCR Modes:
-    - "auto": Check if PDF has text, use OCR only if needed
-    - "force": Always use OCR regardless of text presence
-    - "never": Never use OCR, only extract existing text
+    Refactored PDF search to prioritize pdfminer.six for superior text extraction,
+    with PyPDF2 as a fallback and a consistent normalization pipeline.
     """
     results = []
     try:
-        print(f"\nProcessing PDF: {filepath}")
-        print(f"OCR Mode: {ocr_mode}")
-
-        # Determine if we should use OCR
-        use_ocr = False
-        has_text = False
-
-        if ocr_mode == "force":
-            use_ocr = True
-            print("OCR forced - will use OCR on all pages")
-        elif ocr_mode == "never":
-            use_ocr = False
-            print("OCR disabled - will only extract existing text")
-        else:  # auto mode
-            has_text = pdf_has_text(filepath)
-            use_ocr = not has_text
-            print(
-                f"Auto mode - PDF has text: {has_text}, will use OCR: {use_ocr}")
-
         reader = PdfReader(filepath)
-        print(f"Total pages found: {len(reader.pages)}")
+        print(f"\nProcessing PDF: {filepath} ({len(reader.pages)} pages) with OCR Mode: {ocr_mode}")
 
-        for page_num, page in enumerate(reader.pages, 1):
-            try:
-                text = ""
+        # Determine if OCR should be used based on the entire document, for efficiency
+        should_use_ocr = False
+        if ocr_mode == "force":
+            should_use_ocr = True
+        elif ocr_mode == "auto" and not pdf_has_text(filepath):
+            should_use_ocr = True
+            print("Auto-detected that PDF likely needs OCR.")
 
-                # Try normal text extraction first (unless forcing OCR)
-                if ocr_mode != "force":
+        for page_num_1based, page in enumerate(reader.pages, 1):
+            page_num_0based = page_num_1based - 1
+            raw_text = ""
+
+            # 1. Prioritize pdfminer.six for text extraction
+            if pdfminer_extract_text:
+                try:
+                    # Note: pdfminer page numbers are 0-based
+                    extracted = pdfminer_extract_text(filepath, page_numbers=[page_num_0based])
+                    if extracted and extracted.strip():
+                        raw_text = extracted
+                        print(f"Page {page_num_1based}: Extracted {len(raw_text)} chars with pdfminer.six")
+                except Exception as e:
+                    print(f"Page {page_num_1based}: pdfminer.six failed: {e}. Falling back.")
+
+            # 2. Fallback to PyPDF2 if pdfminer fails or returns nothing
+            if not raw_text.strip():
+                try:
                     extracted = page.extract_text()
                     if extracted and extracted.strip():
-                        text = extracted
-                        print(
-                            f"Page {page_num}: Extracted {len(text)} characters of raw text")
+                        raw_text = extracted
+                        print(f"Page {page_num_1based}: Extracted {len(raw_text)} chars with PyPDF2 (fallback)")
+                except Exception as e:
+                     print(f"Page {page_num_1based}: PyPDF2 fallback failed: {e}")
 
-                # Use OCR if configured and needed
-                if use_ocr and (not text.strip() or ocr_mode == "force"):
-                    if ocr_mode == "never":
-                        print(
-                            f"Page {page_num}: No text found, but OCR is disabled")
-                        continue
+            # 3. Use OCR if forced or if auto-detected and no text was found
+            run_ocr = should_use_ocr and (not raw_text.strip() or ocr_mode == "force")
+            if run_ocr and ocr_mode != "never":
+                print(f"Page {page_num_1based}: No text found or OCR forced, attempting OCR.")
+                try:
+                    from pdf2image import convert_from_path
+                    images = convert_from_path(filepath, first_page=page_num_1based, last_page=page_num_1based)
+                    if images:
+                        ocr_text = extract_text_from_image(images[0])
+                        if ocr_text:
+                            raw_text = ocr_text
+                            print(f"Page {page_num_1based}: OCR extracted {len(raw_text)} chars")
+                except ImportError:
+                    print("Warning: pdf2image is not installed. OCR is unavailable. Install with: pip install pdf2image")
+                except Exception as e:
+                    print(f"Page {page_num_1based}: OCR process failed - {e}")
 
-                    print(f"Page {page_num}: Using OCR.")
-                    try:
-                        from pdf2image import convert_from_path  # may raise ImportError
-                        images = convert_from_path(
-                            filepath, first_page=page_num, last_page=page_num)
-                        if images:
-                            ocr_text = extract_text_from_image(images[0])
-                            if ocr_text:
-                                text = ocr_text
-                                print(
-                                    f"Page {page_num}: OCR extracted {len(text)} characters")
-                        else:
-                            print(
-                                f"Page {page_num}: Failed to convert to image")
-                    except ImportError:
-                        print("Warning: pdf2image not installed, OCR unavailable")
-                        print("Install with: pip install pdf2image")
-                        # fall through; if no text, we won't match
-                    except Exception as e:
-                        print(f"Page {page_num}: OCR error - {str(e)}")
+            # 4. UNIFIED NORMALIZATION AND EVALUATION
+            if raw_text and raw_text.strip():
+                norm_text = normalize_extracted_text(raw_text)
 
-                # >>> NORMALIZAÇÃO ANTES DE AVALIAR <<<
-                if text and text.strip():
-                    norm = normalize_extracted_text(text)
-                    if boolean_parser.is_simple_query():
-                        spans = boolean_parser.find_all_term_occurrences(norm)
-                        for start, end in spans:
-                            context, s, e = boolean_parser.extract_context_at_span(norm, start, end, context_size)
-                            score = boolean_parser.calculate_relevance_score(context, 0, len(context))
-                            results.append(SearchResult(
-                                filepath=filepath,
-                                query=boolean_parser.original_query,
-                                location=page_num,
-                                context=context,
-                                relevance_score=score,
-                                snippet_start=s,
-                                snippet_end=e
-                            ))
-                    else:
-                        matches, score = boolean_parser.evaluate(norm)
-                        if matches:
-                            print(
-                                f"Page {page_num}: Match found with score: {score}")
-                            context, start, end = boolean_parser.extract_context(
-                                norm, context_size)
-                            results.append(SearchResult(
-                                filepath=filepath,
-                                query=boolean_parser.original_query,
-                                location=page_num,
-                                context=context,
-                                relevance_score=score,
-                                snippet_start=start,
-                                snippet_end=end
-                            ))
-
-            except Exception as e:
-                print(f"Error processing page {page_num}: {str(e)}")
-                continue
+                # Logic for simple vs complex queries remains the same
+                if boolean_parser.is_simple_query():
+                    spans = boolean_parser.find_all_term_occurrences(norm_text)
+                    for start, end in spans:
+                        context, s, e = boolean_parser.extract_context_at_span(norm_text, start, end, context_size)
+                        score = boolean_parser.calculate_relevance_score(context, 0, len(context))
+                        results.append(SearchResult(
+                            filepath=filepath,
+                            query=boolean_parser.original_query,
+                            location=page_num_1based,
+                            context=context,
+                            relevance_score=score,
+                            snippet_start=s,
+                            snippet_end=e
+                        ))
+                else:
+                    matches, score = boolean_parser.evaluate(norm_text)
+                    if matches:
+                        print(f"Page {page_num_1based}: Match found with score: {score}")
+                        context, start, end = boolean_parser.extract_context(norm_text, context_size)
+                        results.append(SearchResult(
+                            filepath=filepath,
+                            query=boolean_parser.original_query,
+                            location=page_num_1based,
+                            context=context,
+                            relevance_score=score,
+                            snippet_start=start,
+                            snippet_end=end
+                        ))
 
     except Exception as e:
-        print(f"Error reading PDF file: {str(e)}")
+        print(f"Error reading PDF file {filepath}: {e}")
 
-    print(f"Results found for this PDF: {len(results)}")
+    print(f"Found {len(results)} results for this PDF.")
     return results
 
 
@@ -1877,9 +1878,10 @@ def search_in_docx_file(filepath, boolean_parser, context_size):
     try:
         doc = Document(filepath)
         for para_num, paragraph in enumerate(doc.paragraphs, 1):
-            raw = paragraph.text
-            if raw:
-                text = normalize_extracted_text(raw)
+            raw_text = paragraph.text
+            if raw_text:
+                # UNIFIED NORMALIZATION APPLIED DIRECTLY
+                text = normalize_extracted_text(raw_text)
                 if boolean_parser.is_simple_query():
                     spans = boolean_parser.find_all_term_occurrences(text)
                     for start, end in spans:
@@ -1914,18 +1916,41 @@ def search_in_docx_file(filepath, boolean_parser, context_size):
 
 
 def search_in_html_file(filepath, boolean_parser, context_size):
-    """Search in HTML with sliding window of elements (robusto para NEAR/x entre elementos)."""
+    """
+    Refactored HTML search to preserve structure by adding separators between
+    block elements, ensuring robust proximity searches (NEAR/x).
+    """
     results = []
     try:
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as file:
             soup = BeautifulSoup(file, 'html.parser')
+
+            # 1. Remove non-content tags
             for tag in soup(["script", "style"]):
                 tag.decompose()
-            text = normalize_extracted_text(soup.get_text())
+
+            # 2. "Elite" Solution: Add newlines to simulate document structure
+            # Replace <br> tags with a newline character
+            for br in soup.find_all("br"):
+                br.replace_with("\n")
+
+            # Define block-level elements that should create a line break
+            block_tags = ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'blockquote', 'pre', 'tr', 'hr']
+            for tag in soup.find_all(block_tags):
+                tag.append("\n")
+
+            # 3. Extract text which now includes our structural newlines
+            raw_text = soup.get_text()
+
+            # 4. UNIFIED NORMALIZATION
+            # The new normalize function will handle the newlines perfectly,
+            # converting them to spaces.
+            text = normalize_extracted_text(raw_text)
 
             if not text:
                 return results
 
+            # 5. Evaluation logic (remains unchanged)
             if boolean_parser.is_simple_query():
                 spans = boolean_parser.find_all_term_occurrences(text)
                 for start, end in spans:
@@ -1934,7 +1959,7 @@ def search_in_html_file(filepath, boolean_parser, context_size):
                     results.append(SearchResult(
                         filepath=filepath,
                         query=boolean_parser.original_query,
-                        location=1,
+                        location=1, # Location is simplified for HTML
                         context=context,
                         relevance_score=score,
                         snippet_start=s,
@@ -1943,13 +1968,11 @@ def search_in_html_file(filepath, boolean_parser, context_size):
             else:
                 matches, score = boolean_parser.evaluate(text)
                 if matches:
-                    context, s, e = boolean_parser.extract_context(
-                        text, context_size)
-
+                    context, s, e = boolean_parser.extract_context(text, context_size)
                     results.append(SearchResult(
                         filepath=filepath,
                         query=boolean_parser.original_query,
-                        location=1,  # Simplified for HTML
+                        location=1,
                         context=context,
                         relevance_score=score,
                         snippet_start=s,
