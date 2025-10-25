@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Document Search Tool - Web Interface</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #555;
+        }
+        input[type="text"], input[type="number"], select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .checkbox-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-top: 5px;
+        }
+        .checkbox-group label {
+            font-weight: normal;
+            display: flex;
+            align-items: center;
+        }
+        .checkbox-group input[type="checkbox"] {
+            margin-right: 5px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+            margin-top: 10px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #results {
+            margin-top: 30px;
+        }
+        .error {
+            color: red;
+            margin-top: 10px;
+        }
+        .success {
+            color: green;
+            margin-top: 10px;
+        }
+        .loading {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .advanced-options {
+            background-color: #f9f9f9;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+        .ocr-options {
+            background-color: #f0f0ff;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Document Search Tool</h1>
+
+        <form id="searchForm">
+            <div class="form-group">
+                <label for="directory">Directory Path:</label>
+                <input type="text" id="directory" name="directory" required
+                       placeholder="e.g., C:\Documents or /home/user/documents">
+            </div>
+
+            <div class="form-group">
+                <label for="query">Search Query:</label>
+                <input type="text" id="query" name="query" required
+                       placeholder='e.g., term1 AND term2 OR "exact phrase"'>
+                <small>Use AND, OR, NOT, NEAR/x. Use quotes for exact phrases (e.g., "sound mass" NEAR/3 texture).</small>
+
+            </div>
+
+            <div class="form-group">
+                <label>File Types:</label>
+                <div class="checkbox-group">
+                    <label><input type="checkbox" name="file_types" value="txt" checked> Text (.txt)</label>
+                    <label><input type="checkbox" name="file_types" value="pdf" checked> PDF (.pdf)</label>
+                    <label><input type="checkbox" name="file_types" value="docx" checked> Word (.docx)</label>
+                    <label><input type="checkbox" name="file_types" value="html" checked> HTML (.html)</label>
+                    <label><input type="checkbox" name="file_types" value="image" checked> Images</label>
+                </div>
+            </div>
+
+            <div class="advanced-options">
+                <h3>Advanced Options</h3>
+
+                <div class="ocr-options">
+                    <label for="ocr_mode">OCR Mode for PDFs:</label>
+                    <select id="ocr_mode" name="ocr_mode">
+                        <option value="auto">Auto (detect if needed)</option>
+                        <option value="force">Force OCR (always use)</option>
+                        <option value="never">Never use OCR</option>
+                    </select>
+                    <small>Auto mode will check if PDF has text and only use OCR if needed</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="min_relevance">Minimum Relevance Score (0.0-1.0):</label>
+                    <input type="number" id="min_relevance" name="min_relevance"
+                           min="0" max="1" step="0.1" value="0.1">
+                </div>
+
+                <div class="form-group">
+                    <label for="context_size">Context Window Size:</label>
+                    <input type="number" id="context_size" name="context_size"
+                           min="50" max="500" value="150">
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="show_duplicates" name="show_duplicates">
+                        Show Duplicate Results
+                    </label>
+                </div>
+            </div>
+
+            <button type="submit" id="searchButton">Search Documents</button>
+        </form>
+
+        <div id="message"></div>
+        <div id="results"></div>
+    </div>
+
+    <script>
+        document.getElementById('searchForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const button = document.getElementById('searchButton');
+            const messageDiv = document.getElementById('message');
+            const resultsDiv = document.getElementById('results');
+
+            // Clear previous results
+            messageDiv.innerHTML = '';
+            resultsDiv.innerHTML = '';
+
+            // Disable button and show loading
+            button.disabled = true;
+            button.textContent = 'Searching...';
+            messageDiv.innerHTML = '<div class="loading">Searching documents, please wait...</div>';
+
+            // Collect form data
+            const formData = new FormData(e.target);
+            const data = {
+                directory: formData.get('directory'),
+                query: formData.get('query'),
+                file_types: formData.getAll('file_types'),
+                ocr_mode: formData.get('ocr_mode'),
+                min_relevance: parseFloat(formData.get('min_relevance')),
+                context_size: parseInt(formData.get('context_size')),
+                show_duplicates: formData.get('show_duplicates') ? true : false
+            };
+
+            try {
+                // Send search request
+                const response = await fetch('/search', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                // Check if response is JSON
+                const contentType = response.headers.get("content-type");
+                if (!contentType || !contentType.includes("application/json")) {
+                    throw new TypeError("Server didn't return JSON!");
+                }
+
+                const result = await response.json();
+
+                if (result.status === 'success') {
+                    messageDiv.innerHTML = `<div class="success">Found ${result.total_results} results!</div>`;
+                    resultsDiv.innerHTML = result.results_html;
+
+                    // Add download button
+                    if (result.results_file) {
+                        const filename = result.results_file.split(/[\\/]/).pop();
+                        messageDiv.innerHTML += `
+                            <a href="/download-results/${filename}"
+                               download="search_results.html"
+                               style="display: inline-block; margin-top: 10px;
+                                      padding: 5px 10px; background-color: #2196F3;
+                                      color: white; text-decoration: none;
+                                      border-radius: 4px;">
+                                Download Results
+                            </a>`;
+                    }
+                } else {
+                    messageDiv.innerHTML = `<div class="error">Error: ${result.message}</div>`;
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                messageDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            } finally {
+                // Re-enable button
+                button.disabled = false;
+                button.textContent = 'Search Documents';
+            }
+        });
+    </script>
+</body>
+</html>

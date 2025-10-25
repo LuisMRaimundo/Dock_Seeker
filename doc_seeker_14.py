@@ -1016,17 +1016,22 @@ class BooleanSearchParser:
                 tokens.append(f'"{"".join(buf)}"')
                 continue
 
-            # Operador NEAR/x
+            # Operador NEAR/x (com espaço opcional)
             if q[i:i+5].upper() == 'NEAR/':
                 i += 5
+                # Pular espaços em branco após a barra
+                while i < n and q[i] in WHITESPACE:
+                    i += 1
+
                 num_start = i
                 while i < n and q[i].isdigit():
                     i += 1
-                if num_start == i:
-                    # Sem número após NEAR/ — tratar como literal para evitar crash
-                    tokens.append('NEAR/1')
-                else:
+
+                if num_start < i:
                     tokens.append(f'NEAR/{q[num_start:i]}')
+                else:
+                    # Fallback se não houver número
+                    tokens.append('NEAR/1')
                 continue
 
             # Palavras/operadores AND|OR|NOT
